@@ -712,6 +712,12 @@ try{ enableIndexedDbPersistence(db); }catch(e){ /* fine if it fails (e.g. multip
   function getStorageUsageBytes(){
     try{ return new Blob([JSON.stringify(state)]).size; }catch(e){ return 0; }
   }
+  function renderUsageFooter(){
+    const bytes = getStorageUsageBytes();
+    const pct = bytes / DOC_LIMIT_BYTES;
+    const pctLabel = pct < 0.01 ? "<1" : Math.round(pct * 100);
+    return `Vaquita · tus datos se sincronizan con tu código (icono 🔗 arriba) · Espacio usado: ${pctLabel}%`;
+  }
   function renderStorageWarning(){
     const bytes = getStorageUsageBytes();
     const pct = bytes / DOC_LIMIT_BYTES;
@@ -743,7 +749,7 @@ try{ enableIndexedDbPersistence(db); }catch(e){ /* fine if it fails (e.g. multip
           <summary>Archivadas (${archived.length})</summary>
           <div class="grid-cards">${archived.map(groupCard).join("")}</div>
         </details>` : ""}
-      <footer class="foot">Vaquita · tus datos se sincronizan con tu código (icono 🔗 arriba).</footer>
+      <footer class="foot">${renderUsageFooter()}</footer>
     `;
   }
 
@@ -967,7 +973,7 @@ try{ enableIndexedDbPersistence(db); }catch(e){ /* fine if it fails (e.g. multip
       </div>
 
       ${renderSettlement(g)}
-      <footer class="foot">Vaquita · tus datos se sincronizan con tu código (icono 🔗 arriba).</footer>
+      <footer class="foot">${renderUsageFooter()}</footer>
     `;
   }
 
