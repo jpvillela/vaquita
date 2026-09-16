@@ -232,6 +232,18 @@
   .split-sum-note.bad{color:var(--owes);}
   .split-sum-note.good{color:var(--brand);}
 
+  #exp-receipt-file{
+    font-size:0.85rem; padding:6px 0;
+  }
+  .receipt-preview{display:flex; align-items:center; gap:12px; margin-top:8px;}
+  .receipt-preview img{width:70px; height:70px; object-fit:cover; border-radius:8px; border:1px solid var(--border);}
+
+  .storage-warning{
+    padding:12px 16px; border-radius:10px; margin-bottom:20px; font-size:0.86rem; line-height:1.45;
+    border:1px solid var(--owes); background:var(--owes-soft); color:var(--owes);
+  }
+  .storage-warning.urgent{font-weight:700;}
+
   /* receipt */
   .receipt{
     position:relative; background:var(--surface); border:1px solid var(--border);
@@ -696,11 +708,29 @@ try{ enableIndexedDbPersistence(db); }catch(e){ /* fine if it fails (e.g. multip
       </button>`;
   }
 
+  const DOC_LIMIT_BYTES = 1048576; // Firestore's per-document cap
+  function getStorageUsageBytes(){
+    try{ return new Blob([JSON.stringify(state)]).size; }catch(e){ return 0; }
+  }
+  function renderStorageWarning(){
+    const bytes = getStorageUsageBytes();
+    const pct = bytes / DOC_LIMIT_BYTES;
+    if(pct < 0.75) return "";
+    const pctLabel = Math.round(pct * 100);
+    const urgent = pct >= 0.95;
+    return `
+      <div class="storage-warning ${urgent ? 'urgent' : ''}">
+        ⚠️ Estás usando el ${pctLabel}% del espacio disponible para este código de sincronización${urgent ? " — muy cerca del límite" : ""}.
+        Elimina grupos antiguos que ya no necesites, o evita subir más fotos de boletas por ahora.
+      </div>`;
+  }
+
   function renderDashboard(){
     const active = state.groups.filter(g => g.status !== "archived");
     const archived = state.groups.filter(g => g.status === "archived");
     return `
       ${renderHeader()}
+      ${renderStorageWarning()}
       <div class="new-group-row">
         <input type="text" id="new-group-name" placeholder="Nombre del grupo, ej. Cumpleaños Mamá" maxlength="60">
         <button class="btn primary" data-action="create-group">+ Nueva vaquita</button>
@@ -730,6 +760,7 @@ try{ enableIndexedDbPersistence(db); }catch(e){ /* fine if it fails (e.g. multip
         <td><span class="desc">${esc(exp.description)}</span><span class="split-note">${note}</span></td>
         <td class="amount mono">${fmt(exp.amount)}</td>
         <td class="row-actions">
+          ${exp.receiptImage ? `<button class="btn ghost small" data-action="view-receipt" data-id="${exp.id}" title="Ver boleta">🧾</button>` : ""}
           <button class="btn ghost small" data-action="edit-expense" data-id="${exp.id}" title="Editar">✎</button>
           <button class="btn ghost small" data-action="delete-expense" data-id="${exp.id}" title="Eliminar">✕</button>
         </td>
@@ -861,6 +892,20 @@ try{ enableIndexedDbPersistence(db); }catch(e){ /* fine if it fails (e.g. multip
         <div class="form-row">
           ${splitEditorHtml(g, exp)}
         </div>
+        <div class="form-row">
+          <div class="field" style="flex-basis:100%;">
+            <label>Boleta (opcional)</label>
+            <input type="file" accept="image/*" id="exp-receipt-file">
+            <input type="hidden" id="exp-receipt-current" value="${exp && exp.receiptImage ? esc(exp.receiptImage) : ''}">
+            <div id="receipt-preview-wrap">
+              ${exp && exp.receiptImage ? `
+                <div class="receipt-preview">
+                  <img src="${exp.receiptImage}" alt="Boleta actual">
+                  <button type="button" class="btn ghost small" data-action="remove-receipt">Quitar foto</button>
+                </div>` : ""}
+            </div>
+          </div>
+        </div>
         <div class="form-row" style="justify-content:flex-end;">
           <button type="button" class="btn ghost" data-action="cancel-expense-form">Cancelar</button>
           <button type="submit" class="btn primary">${exp?'Guardar cambios':'Agregar gasto'}</button>
@@ -876,6 +921,7 @@ try{ enableIndexedDbPersistence(db); }catch(e){ /* fine if it fails (e.g. multip
 
     return `
       ${renderHeader()}
+      ${renderStorageWarning()}
       <div class="back">
         <button class="btn ghost" data-action="back-dashboard">← Todos los grupos</button>
       </div>
@@ -979,6 +1025,19 @@ try{ enableIndexedDbPersistence(db); }catch(e){ /* fine if it fails (e.g. multip
     else if(action === "copy-share"){ copyShareText(); }
     else if(action === "share-image"){ openReceiptImage(findGroup(view.groupId)); }
     else if(action === "show-sync"){ openSyncModal(); }
+    else if(action === "remove-receipt"){
+      const cur = document.getElementById("exp-receipt-current");
+      if(cur) cur.value = "";
+      const wrap = document.getElementById("receipt-preview-wrap");
+      if(wrap) wrap.innerHTML = "";
+      const fileInput = document.getElementById("exp-receipt-file");
+      if(fileInput) fileInput.value = "";
+    }
+    else if(action === "view-receipt"){
+      const g = findGroup(view.groupId);
+      const exp = g && g.expenses.find(e => e.id === btn.dataset.id);
+      if(exp && exp.receiptImage) openReceiptPhotoModal(exp.receiptImage, exp.description);
+    }
   }
 
   function onChange(e){
@@ -1223,6 +1282,43 @@ try{ enableIndexedDbPersistence(db); }catch(e){ /* fine if it fails (e.g. multip
     });
   }
 
+  function openReceiptPhotoModal(imgSrc, desc){
+    const ov = openModal(`
+      <h3>Boleta${desc ? " — " + esc(desc) : ""}</h3>
+      <div class="receipt-image-frame"><img src="${imgSrc}" alt="Boleta"></div>
+      <div class="modal-actions" style="margin-top:14px;"><button class="btn ghost" id="modal-close-receipt">Cerrar</button></div>
+    `, { wide: true });
+    ov.querySelector("#modal-close-receipt").addEventListener("click", closeModal);
+  }
+
+  function compressImage(file, maxWidth, quality){
+    maxWidth = maxWidth || 700;
+    quality = quality || 0.55;
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = e => {
+        const img = new Image();
+        img.onload = () => {
+          let { width, height } = img;
+          if(width > maxWidth){
+            height = Math.round(height * (maxWidth / width));
+            width = maxWidth;
+          }
+          const canvas = document.createElement("canvas");
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext("2d");
+          ctx.drawImage(img, 0, 0, width, height);
+          resolve(canvas.toDataURL("image/jpeg", quality));
+        };
+        img.onerror = () => reject(new Error("No se pudo leer la imagen"));
+        img.src = e.target.result;
+      };
+      reader.onerror = () => reject(new Error("No se pudo leer el archivo"));
+      reader.readAsDataURL(file);
+    });
+  }
+
   let pendingSplitPick = "all";
   let pendingSubmode = "equal";
 
@@ -1272,7 +1368,7 @@ try{ enableIndexedDbPersistence(db); }catch(e){ /* fine if it fails (e.g. multip
     }
   }
 
-  function onSubmit(e){
+  async function onSubmit(e){
     if(e.target.id !== "expense-form") return;
     e.preventDefault();
     const form = e.target;
@@ -1307,7 +1403,22 @@ try{ enableIndexedDbPersistence(db); }catch(e){ /* fine if it fails (e.g. multip
       }
     }
 
-    const payload = { description: desc, amount, payer, splitMode, fixedParticipants, percents, amounts };
+    let receiptImage = form.querySelector("#exp-receipt-current")?.value || null;
+    const fileInput = form.querySelector("#exp-receipt-file");
+    if(fileInput && fileInput.files && fileInput.files[0]){
+      const submitBtn = form.querySelector('button[type="submit"]');
+      const origLabel = submitBtn ? submitBtn.textContent : "";
+      if(submitBtn){ submitBtn.disabled = true; submitBtn.textContent = "Procesando foto…"; }
+      try{
+        receiptImage = await compressImage(fileInput.files[0]);
+      }catch(err){
+        console.error("Vaquita: no se pudo procesar la boleta", err);
+        showAlert("No se pudo procesar la foto de la boleta. El gasto se guardará sin ella.");
+      }
+      if(submitBtn){ submitBtn.disabled = false; submitBtn.textContent = origLabel; }
+    }
+
+    const payload = { description: desc, amount, payer, splitMode, fixedParticipants, percents, amounts, receiptImage: receiptImage || null };
     const expId = form.dataset.expid;
     view.showExpenseForm = false;
     view.editingExpenseId = null;
