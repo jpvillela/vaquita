@@ -95,6 +95,12 @@
   .brand .mark{font-size:1.5rem;}
   .brand h1{font-size:1.7rem; margin:0;}
   .tagline{color:var(--ink-soft); font-size:0.92rem; margin:2px 0 0;}
+  .sync-chip{
+    display:inline-flex; align-items:center; gap:6px; padding:7px 12px; border-radius:999px;
+    border:1px solid var(--border); background:var(--surface); color:var(--ink-soft);
+    font-size:0.8rem; cursor:pointer; white-space:nowrap;
+  }
+  .sync-chip:hover{border-color:var(--brand); color:var(--ink);}
 
   .btn{
     appearance:none; border:1px solid var(--border); background:var(--surface);
@@ -305,31 +311,113 @@
 
 <div class="wrap" id="app"></div>
 
-<script>
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/11.2.0/firebase-app.js";
+import { getFirestore, doc, getDoc, setDoc, onSnapshot, enableIndexedDbPersistence } from "https://www.gstatic.com/firebasejs/11.2.0/firebase-firestore.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyBl3ySQvwKhNgsyExnCWKsyvtITq4eDApY",
+  authDomain: "vaquita-a337d.firebaseapp.com",
+  projectId: "vaquita-a337d",
+  storageBucket: "vaquita-a337d.firebasestorage.app",
+  messagingSenderId: "831550739621",
+  appId: "1:831550739621:web:040d730454c9a4d1e2e94c"
+};
+const fbApp = initializeApp(firebaseConfig);
+const db = getFirestore(fbApp);
+try{ enableIndexedDbPersistence(db); }catch(e){ /* fine if it fails (e.g. multiple tabs) */ }
+
 (function(){
   "use strict";
 
-  /* ---------- storage layer (swap-friendly: localStorage now, could become synced db later) ---------- */
-  const STORAGE_KEY = "vaquita-state-v1";
+  /* ---------- storage layer: Firestore, keyed by a random "código de sincronización" kept in localStorage ---------- */
+  const CODE_KEY = "vaquita-sync-code";
+
+  function genCode(){
+    if(window.crypto && typeof crypto.randomUUID === "function"){
+      return crypto.randomUUID().replace(/-/g, "").toUpperCase();
+    }
+    const bytes = new Uint8Array(16);
+    if(window.crypto && typeof crypto.getRandomValues === "function"){
+      crypto.getRandomValues(bytes);
+    } else {
+      for(let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
+    }
+    return Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("").toUpperCase();
+  }
+  function formatCode(code){
+    return (code || "").match(/.{1,4}/g)?.join("-") || "";
+  }
+  function getSyncCode(){
+    let code = localStorage.getItem(CODE_KEY);
+    if(!code){
+      code = genCode();
+      localStorage.setItem(CODE_KEY, code);
+    }
+    return code;
+  }
+  function setSyncCode(code){
+    localStorage.setItem(CODE_KEY, code);
+  }
+
+  let syncCode = getSyncCode();
+  let lastSyncedJson = null;
+  let unsubscribeSnapshot = null;
+
   const Store = {
-    load(){
+    async load(code){
       try{
-        const raw = localStorage.getItem(STORAGE_KEY);
-        if(!raw) return { groups: [] };
-        const parsed = JSON.parse(raw);
-        if(!parsed.groups) return { groups: [] };
-        return parsed;
-      }catch(e){ return { groups: [] }; }
+        const snap = await getDoc(doc(db, "vaquitas", code));
+        if(snap.exists()){
+          const data = snap.data();
+          return (data && Array.isArray(data.groups)) ? data : { groups: [] };
+        }
+        return { groups: [] };
+      }catch(e){
+        console.error("Vaquita: no se pudo cargar desde Firestore", e);
+        return { groups: [] };
+      }
     },
-    save(state){
-      try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }catch(e){}
+    save(code, data){
+      const json = JSON.stringify(data);
+      lastSyncedJson = json;
+      setDoc(doc(db, "vaquitas", code), data).catch(e => {
+        console.error("Vaquita: no se pudo guardar en Firestore", e);
+      });
     }
   };
 
-  let state = Store.load();
+  function switchSyncCode(newCode){
+    newCode = (newCode || "").replace(/[^A-Z0-9]/gi, "").toUpperCase();
+    if(!newCode || newCode === syncCode) return;
+    setSyncCode(newCode);
+    syncCode = newCode;
+    lastSyncedJson = null;
+    view = { screen: "dashboard", groupId: null };
+    init();
+  }
+
+  function subscribeSync(code){
+    if(unsubscribeSnapshot) unsubscribeSnapshot();
+    unsubscribeSnapshot = onSnapshot(doc(db, "vaquitas", code), snap => {
+      if(!snap.exists()) return;
+      const data = snap.data();
+      if(!data || !Array.isArray(data.groups)) return;
+      const json = JSON.stringify(data);
+      if(json === lastSyncedJson) return;
+      lastSyncedJson = json;
+      state = data;
+      render();
+    }, err => console.error("Vaquita: error de sincronización", err));
+  }
+
+  let state = { groups: [] };
   let view = { screen: "dashboard", groupId: null };
 
-  function persist(){ Store.save(state); render(); }
+  function persist(){
+    render();
+    Store.save(syncCode, state);
+  }
   function uid(){ return Math.random().toString(36).slice(2,10) + Date.now().toString(36).slice(-4); }
   function fmt(n){
     n = Math.round(n||0);
@@ -541,7 +629,48 @@
             <p class="tagline">Junten la plata, sepan quién debe qué.</p>
           </div>
         </div>
+        <button class="sync-chip" data-action="show-sync" title="Sincronización entre dispositivos">
+          🔗 <span class="mono">${esc(formatCode(syncCode).slice(0, 9))}…</span>
+        </button>
       </header>`;
+  }
+
+  function openSyncModal(){
+    const ov = openModal(`
+      <h3>Sincronización</h3>
+      <p class="modal-message">Este código conecta tus datos entre dispositivos. Ingresa el mismo código en tu otro celular o PC para ver aquí la misma información.</p>
+      <div class="field">
+        <label>Tu código actual</label>
+        <div style="display:flex; gap:8px;">
+          <input type="text" readonly value="${esc(formatCode(syncCode))}" id="sync-code-display" class="mono" style="flex:1;">
+          <button class="btn small" id="sync-copy">Copiar</button>
+        </div>
+      </div>
+      <div class="field" style="margin-top:16px;">
+        <label>Usar otro código (para vincular otro dispositivo, o unirte a uno compartido)</label>
+        <div style="display:flex; gap:8px;">
+          <input type="text" placeholder="Pega un código aquí" id="sync-code-input">
+          <button class="btn small primary" id="sync-switch">Usar</button>
+        </div>
+      </div>
+      <div class="modal-actions" style="margin-top:16px;"><button class="btn ghost" id="sync-close">Cerrar</button></div>
+    `, { wide: false });
+    ov.querySelector("#sync-close").addEventListener("click", closeModal);
+    ov.querySelector("#sync-copy").addEventListener("click", () => {
+      const input = ov.querySelector("#sync-code-display");
+      input.select();
+      try{ document.execCommand("copy"); }catch(e){}
+      const btn = ov.querySelector("#sync-copy");
+      const orig = btn.textContent;
+      btn.textContent = "¡Copiado!";
+      setTimeout(() => { btn.textContent = orig; }, 1500);
+    });
+    ov.querySelector("#sync-switch").addEventListener("click", () => {
+      const val = ov.querySelector("#sync-code-input").value;
+      if(!val.trim()) return;
+      closeModal();
+      switchSyncCode(val);
+    });
   }
 
   function groupCard(g){
@@ -584,7 +713,7 @@
           <summary>Archivadas (${archived.length})</summary>
           <div class="grid-cards">${archived.map(groupCard).join("")}</div>
         </details>` : ""}
-      <footer class="foot">Vaquita · tus datos se guardan solo en este navegador.</footer>
+      <footer class="foot">Vaquita · tus datos se sincronizan con tu código (icono 🔗 arriba).</footer>
     `;
   }
 
@@ -792,7 +921,7 @@
       </div>
 
       ${renderSettlement(g)}
-      <footer class="foot">Vaquita · tus datos se guardan solo en este navegador.</footer>
+      <footer class="foot">Vaquita · tus datos se sincronizan con tu código (icono 🔗 arriba).</footer>
     `;
   }
 
@@ -849,6 +978,7 @@
     else if(action === "toggle-paid"){ /* handled in onChange */ }
     else if(action === "copy-share"){ copyShareText(); }
     else if(action === "share-image"){ openReceiptImage(findGroup(view.groupId)); }
+    else if(action === "show-sync"){ openSyncModal(); }
   }
 
   function onChange(e){
@@ -1188,6 +1318,13 @@
     }
   }
 
-  render();
+  async function init(){
+    document.getElementById("app").innerHTML = '<p style="padding:60px 0; text-align:center; color:var(--ink-soft);">Cargando tu Vaquita…</p>';
+    state = await Store.load(syncCode);
+    lastSyncedJson = JSON.stringify(state);
+    render();
+    subscribeSync(syncCode);
+  }
+  init();
 })();
 </script>
